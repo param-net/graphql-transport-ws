@@ -68,32 +68,51 @@ func applyOptions(opts ...Option) *options {
 	return &o
 }
 
+func processHTTPRequst(ctx *context.Context, options *options, svc connection.GraphQLService, httpHandler http.Handler, w http.ResponseWriter, r *http.Request) {
+	if ctx == nil && options == nil {
+		_ctx := context.Background()
+		ctx = &_ctx
+	}
+	for _, subprotocol := range websocket.Subprotocols(r) {
+		if subprotocol == "graphql-ws" {
+			if options != nil {
+				_ctx, err := buildContext(r, options.contextGenerators)
+				if err != nil {
+					return
+				}
+				ctx = &_ctx
+			}
+			ws, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+
+			if ws.Subprotocol() != protocolGraphQLWS {
+				ws.Close()
+				return
+			}
+
+			go connection.Connect(*ctx, ws, svc)
+			return
+		}
+	}
+	// Fallback to HTTP
+	httpHandler.ServeHTTP(w, r)
+}
+
+// NewHandler returns an http.HandlerFunc that supports GraphQL over websockets
+func NewHandler(ctx context.Context, svc connection.GraphQLService, httpHandler http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		processHTTPRequst(&ctx, nil, svc, httpHandler, w, r)
+	}
+}
+
 // NewHandlerFunc returns an http.HandlerFunc that supports GraphQL over websockets
 func NewHandlerFunc(svc connection.GraphQLService, httpHandler http.Handler, options ...Option) http.HandlerFunc {
 	o := applyOptions(options...)
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		for _, subprotocol := range websocket.Subprotocols(r) {
-			if subprotocol == "graphql-ws" {
-				ctx, err := buildContext(r, o.contextGenerators)
-
-				ws, err := upgrader.Upgrade(w, r, nil)
-				if err != nil {
-					return
-				}
-
-				if ws.Subprotocol() != protocolGraphQLWS {
-					ws.Close()
-					return
-				}
-
-				go connection.Connect(ctx, ws, svc)
-				return
-			}
-		}
-
-		// Fallback to HTTP
-		httpHandler.ServeHTTP(w, r)
+		processHTTPRequst(nil, o, svc, httpHandler, w, r)
 	}
 }
 
